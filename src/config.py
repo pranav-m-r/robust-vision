@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -6,6 +7,7 @@ class TrainDataConfig:
     """Paths for the training pipeline."""
     train_path: str = "data/source_toxic.pt"
     val_path: str = "data/val_sanity.pt"
+    checkpoint_path: Optional[str] = None
 
 
 @dataclass
@@ -14,6 +16,7 @@ class EvalDataConfig:
     model_path: str = "results/train/base_model.pt"
     val_path: str = "data/val_sanity.pt"
     test_path: str = "data/static.pt"
+    test_suite_path: str = "data/test_suite_public.pt"
 
 
 @dataclass
@@ -22,7 +25,11 @@ class TrainingConfig:
     seed: int = 42
     epochs: int = 25
     batch_size: int = 64
-    lr: float = 1e-5
+    lr: float = 1e-3
+    weight_decay: float = 1e-4
+    warmup_epochs: int = 2
+    eta_min: float = 1e-6
+    grad_clip_norm: float = 1.0
     num_classes: int = 10
     augmentation_factor: int = 5
 
@@ -33,7 +40,6 @@ class InferenceConfig:
     seed: int = 42
     batch_size: int = 64
     num_classes: int = 10
-    noise_rate: float = 0.3
 
 
 @dataclass
@@ -48,7 +54,6 @@ class TemperatureConfig:
     """Hyper-parameters for post-hoc temperature scaling."""
     t_min: float = 0.1
     t_max: float = 10.0
-    steps: int = 200
 
 
 @dataclass

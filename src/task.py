@@ -1,11 +1,13 @@
 import csv
 import logging
 import os
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 
 from src.loss import TruncatedLoss
@@ -17,12 +19,20 @@ def train_epoch(
     criterion: TruncatedLoss,
     optimizer: Optimizer,
     device: torch.device,
+    scheduler: Optional[LRScheduler] = None,
+    grad_clip_norm: float = 0.0,
 ) -> float:
     """
     Run one full training epoch over the source loader.
 
     The source loader must yield (images, labels, indexes) triples
     (i.e. CustomPTDataset with return_index=True).
+
+    Parameters
+    ----------
+    scheduler      : if provided, .step() is called once per batch (for
+                     CosineAnnealingWarmRestarts / OneCycleLR-style schedulers).
+    grad_clip_norm : if > 0, clips gradient norms before optimizer.step().
 
     Returns the mean batch loss for the epoch.
     """
@@ -39,7 +49,14 @@ def train_epoch(
 
         loss = criterion(outputs, labels, indexes)
         loss.backward()
+
+        if grad_clip_norm > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+
         optimizer.step()
+
+        if scheduler is not None:
+            scheduler.step()
 
         criterion.update_weight(outputs.detach(), labels, indexes)
 
@@ -72,38 +89,6 @@ def evaluate(
 
             total += labels.size(0)
             correct += (preds == labels).sum().item()
-
-    return 100.0 * correct / total
-
-
-def evaluate_with_prior_correction(
-    model: nn.Module,
-    loader: DataLoader,
-    importance_weights: torch.Tensor,
-    device: torch.device,
-) -> float:
-    """
-    Inference with BBSE prior correction:
-        p_corrected(y | x) ∝ w_y · p_model(y | x)
-    """
-    model.eval()
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for batch_data in loader:
-            images = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
-            labels = batch_data[1] if isinstance(batch_data, (tuple, list)) else None
-
-            images = images.to(device)
-            probs = F.softmax(model(images), dim=1)
-            corrected = probs * importance_weights.unsqueeze(0)
-            preds = corrected.argmax(dim=1)
-
-            if labels is not None:
-                labels = labels.to(device)
-                correct += (preds == labels).sum().item()
-                total += labels.size(0)
 
     return 100.0 * correct / total
 

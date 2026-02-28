@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import random
 
@@ -6,6 +7,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 from omegaconf import DictConfig
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
 from src.dataset import CustomPTDataset
@@ -47,6 +49,7 @@ class TrainPipeline:
     # ------------------------------------------------------------------
 
     def run(self, results_dir: str = ".") -> None:
+        self.results_dir = results_dir
         train_loader, train_dataset = self._build_dataloaders()
         model = self._train(train_loader, train_dataset)
 
@@ -84,16 +87,82 @@ class TrainPipeline:
             k=self.loss.k,
             trainset_size=len(train_dataset),
         ).to(self.device)
-        optimizer = optim.Adam(model.parameters(), lr=self.training.lr)
 
-        for epoch in range(self.training.epochs):
-            loss = train_epoch(model, train_loader, criterion, optimizer, self.device)
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=self.training.lr,
+            weight_decay=self.training.weight_decay,
+        )
+
+        # Scheduler: linear warmup → cosine annealing to eta_min
+        steps_per_epoch = len(train_loader)
+        warmup_steps = self.training.warmup_epochs * steps_per_epoch
+        total_steps = self.training.epochs * steps_per_epoch
+
+        warmup_scheduler = LinearLR(
+            optimizer, start_factor=1e-3, total_iters=warmup_steps
+        )
+        cosine_scheduler = CosineAnnealingWarmRestarts(
+            optimizer, T_0=total_steps - warmup_steps, T_mult=1, eta_min=self.training.eta_min
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+
+        # ---- Resume from checkpoint if provided ----
+        start_epoch = 0
+        checkpoint_path = getattr(self.data, "checkpoint_path", None)
+        if checkpoint_path is not None:
+            logging.info("Resuming from checkpoint: %s", checkpoint_path)
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            criterion.load_state_dict(checkpoint["criterion_state_dict"])
+            start_epoch = checkpoint["epoch"]
+            logging.info("Resumed at epoch %d", start_epoch)
+
+        for epoch in range(start_epoch, self.training.epochs):
+            loss = train_epoch(
+                model, train_loader, criterion, optimizer, self.device,
+                scheduler=scheduler,
+                grad_clip_norm=self.training.grad_clip_norm,
+            )
+            current_lr = optimizer.param_groups[0]["lr"]
 
             logging.info(
-                "Epoch %d/%d | Loss: %.4f",
+                "Epoch %d/%d | Loss: %.4f | LR: %.2e",
                 epoch + 1,
                 self.training.epochs,
                 loss,
+                current_lr,
             )
 
+            # ---- Save checkpoint every 5 epochs ----
+            if (epoch + 1) % 5 == 0:
+                self._save_checkpoint(model, optimizer, scheduler, criterion, epoch + 1)
+
         return model
+
+    def _save_checkpoint(
+        self,
+        model: torch.nn.Module,
+        optimizer: optim.Optimizer,
+        scheduler,
+        criterion: torch.nn.Module,
+        epoch: int,
+    ) -> None:
+        checkpoint_path = os.path.join(self.results_dir, "latest.pt")
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "criterion_state_dict": criterion.state_dict(),
+            },
+            checkpoint_path,
+        )
+        logging.info("Checkpoint saved at epoch %d → %s", epoch, checkpoint_path)
