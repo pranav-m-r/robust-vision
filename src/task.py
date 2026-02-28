@@ -76,6 +76,38 @@ def evaluate(
     return 100.0 * correct / total
 
 
+def evaluate_with_prior_correction(
+    model: nn.Module,
+    loader: DataLoader,
+    importance_weights: torch.Tensor,
+    device: torch.device,
+) -> float:
+    """
+    Inference with BBSE prior correction:
+        p_corrected(y | x) ∝ w_y · p_model(y | x)
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch_data in loader:
+            images = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
+            labels = batch_data[1] if isinstance(batch_data, (tuple, list)) else None
+
+            images = images.to(device)
+            probs = F.softmax(model(images), dim=1)
+            corrected = probs * importance_weights.unsqueeze(0)
+            preds = corrected.argmax(dim=1)
+
+            if labels is not None:
+                labels = labels.to(device)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+
+    return 100.0 * correct / total
+
+
 def predict(
     model: nn.Module,
     loader: DataLoader,
