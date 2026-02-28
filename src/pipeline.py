@@ -70,9 +70,19 @@ class Pipeline:
     def _build_dataloaders(
         self,
     ) -> tuple[DataLoader, DataLoader, DataLoader, CustomPTDataset, CustomPTDataset]:
-        source_dataset = CustomPTDataset(self.data.source_path, return_index=True)
-        val_dataset = CustomPTDataset(self.data.val_path, return_index=False)
-        target_dataset = CustomPTDataset(self.data.target_path, return_index=False)
+        source_dataset = CustomPTDataset(
+            self.data.source_path,
+            return_index=True,
+            split="train",
+            augmentation_factor=self.training.augmentation_factor,
+        )
+        val_dataset = CustomPTDataset(
+            self.data.val_path,
+            return_index=False,
+            split="val",
+            augmentation_factor=self.training.augmentation_factor,
+        )
+        target_dataset = CustomPTDataset(self.data.target_path, return_index=False, split="target")
 
         source_loader = DataLoader(source_dataset, batch_size=self.training.batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=self.training.batch_size)

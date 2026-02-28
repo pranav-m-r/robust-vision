@@ -16,6 +16,7 @@ pipeline:
     batch_size: 64
     lr: 1e-5
     num_classes: 10
+    augmentation_factor: 5 
 
   loss:
     # Generalised cross-entropy exponent (0 < q <= 1; lower = more robust)
