@@ -7,6 +7,20 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 
+# Patrini et al. 2017 (https://arxiv.org/pdf/1609.03683)
+# T[i,j] = P(ŷ=j | y=i)
+# Symmetric noise: diagonal = 1-ε, off-diagonal = ε/(K-1)
+def build_transition_matrix(
+    noise_rate: float = 0.30,
+    num_classes: int = 10,
+    device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    off_diag = noise_rate / (num_classes - 1)
+    T = torch.full((num_classes, num_classes), off_diag, device=device)
+    T.fill_diagonal_(1.0 - noise_rate)
+    return T
+
+
 class TemperatureScaledModel(nn.Module):
     """
     Wraps a model with a fixed scalar temperature applied to its logits.
@@ -34,32 +48,38 @@ def find_optimal_temperature(
     t_min: float = 0.1,
     t_max: float = 10.0,
     steps: int = 200,
+    noise_rate: float = 0.30,
 ) -> float:
     """
     Grid-search for the temperature T that minimises NLL on the validation set.
-
-    T > 1 → softer predictions (fixes overconfident model).
-    Uses only the clean labeled validation set; no target labels are needed.
-
+    Labels are forward-corrected via T before NLL is computed.
     Reference: Guo et al., ICML 2017. https://arxiv.org/abs/1706.04599
     """
     model.eval()
+    num_classes = None
     all_logits, all_labels = [], []
 
     with torch.no_grad():
         for images, labels in val_loader:
-            all_logits.append(model(images.to(device)).cpu())
+            logits = model(images.to(device)).cpu()
+            all_logits.append(logits)
             all_labels.append(labels)
+            num_classes = logits.shape[1]
 
-    all_logits = torch.cat(all_logits, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
+    all_logits = torch.cat(all_logits, dim=0)   # (N, K)
+    all_labels = torch.cat(all_labels, dim=0)   # (N,)
+
+    # Forward correction: build soft label targets p̃ = T[y] for each sample
+    T = build_transition_matrix(noise_rate, num_classes, device=torch.device("cpu"))
+    soft_labels = T[all_labels]                 # (N, K)  — row of T for each noisy label
 
     best_T, best_nll = 1.0, float("inf")
-    for T in torch.linspace(t_min, t_max, steps):
-        T = T.item()
-        nll = F.cross_entropy(all_logits / T, all_labels).item()
+    for temp in torch.linspace(t_min, t_max, steps):
+        temp = temp.item()
+        log_probs = F.log_softmax(all_logits / temp, dim=1)   # (N, K)
+        nll = -(soft_labels * log_probs).sum(dim=1).mean().item()
         if nll < best_nll:
-            best_nll, best_T = nll, T
+            best_nll, best_T = nll, temp
 
     logging.info(f"    Optimal T={best_T:.3f}  (NLL={best_nll:.4f})")
     return best_T
@@ -72,15 +92,7 @@ def recalibrate_bn_robust(
 ) -> nn.Module:
     """
     Robust batch-norm recalibration via median-of-batch-means.
-
-    Runs the model in train() mode so each forward pass normalises activations
-    with actual batch statistics.  Running stats are then set to the median
-    across batches, which has a 50 % breakdown point and is therefore robust
-    to batches dominated by impulse/corruption noise.
-
-    Reference: Schneider et al., "Improving robustness against common
-    corruptions by covariate shift adaptation", NeurIPS 2020.
-    https://arxiv.org/abs/2006.16971
+    Reference: Schneider et al., NeurIPS 2020. https://arxiv.org/abs/2006.16971
     """
     model.train()
     model.requires_grad_(False)
@@ -91,8 +103,6 @@ def recalibrate_bn_robust(
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
     ]
 
-    # momentum=0 keeps running stats frozen during forward passes so we can
-    # set them manually to the median afterwards.
     for module in bn_modules:
         module.momentum = 0
 
@@ -103,10 +113,10 @@ def recalibrate_bn_robust(
     def make_hook(idx: int):
         def hook(module: nn.Module, input: tuple, output: torch.Tensor) -> None:
             x = input[0].detach()
-            if x.dim() == 4:  # Conv BN: [B, C, H, W]
+            if x.dim() == 4:
                 m = x.mean(dim=[0, 2, 3])
                 v = x.var(dim=[0, 2, 3], unbiased=False)
-            else:  # Linear BN: [B, C]
+            else:
                 m = x.mean(dim=0)
                 v = x.var(dim=0, unbiased=False)
             all_means[idx].append(m.cpu())
@@ -143,15 +153,20 @@ def compute_soft_confusion_matrix(
     dataloader: DataLoader,
     num_classes: int,
     device: torch.device,
+    noise_rate: float = 0.30,
 ) -> torch.Tensor:
     """
-    Compute the soft confusion matrix C where:
-        C[i, j] = E[ p_θ(i | x) | y = j ]
+    Forward correction (Patrini et al. 2017, Eq. 3):
+        p̃(y | x) = T · p(y | x)
 
-    Rows correspond to predicted class, columns to true class.
-    Returns a tensor of shape (num_classes, num_classes).
+    where T is the noise transition matrix.  The confusion matrix C used by
+    BBSE is then estimated from these noise-corrected probabilities.
+
+    C[i, j] = E[ p̃_θ(i | x) | y = j ]
     """
     model.eval()
+
+    T = build_transition_matrix(noise_rate, num_classes, device)
 
     class_prob_sums = torch.zeros(num_classes, num_classes, device=device)
     class_counts = torch.zeros(num_classes, device=device)
@@ -161,12 +176,12 @@ def compute_soft_confusion_matrix(
             images = images.to(device)
             labels = labels.to(device)
 
-            logits = model(images)
-            probs = F.softmax(logits, dim=1)  # (B, num_classes)
+            probs = F.softmax(model(images), dim=1)          # (B, K)
+            corrected = (T @ probs.T).T                      # (B, K)  forward correction
 
             for i in range(images.size(0)):
                 true_class = labels[i]
-                class_prob_sums[:, true_class] += probs[i]
+                class_prob_sums[:, true_class] += corrected[i]
                 class_counts[true_class] += 1
 
     for j in range(num_classes):
@@ -177,11 +192,6 @@ def compute_soft_confusion_matrix(
 
 
 def get_source_priors(dataset: Dataset, num_classes: int = 10) -> torch.Tensor:
-    """
-    Compute the source class distribution π_s from a labeled dataset.
-
-    Returns a probability vector of shape (num_classes,).
-    """
     labels = dataset.labels
     priors = torch.zeros(num_classes)
     for c in range(num_classes):
@@ -198,16 +208,7 @@ def estimate_target_priors_bbse(
     num_classes: int = 10,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Black Box Shift Estimation (BBSE) for label shift correction.
-
-    Uses soft predicted class probabilities (averaged over the target set)
-    rather than hard argmax for a more stable μ_t estimate on noisy data.
-
-    Solves the linear system:  C · π_t = μ_t  →  π_t = C⁻¹ · μ_t
-
-    Returns:
-        target_priors: estimated target class distribution π_t, shape (num_classes,)
-        importance_weights: per-class ratio w_c = π_t[c] / π_s[c], shape (num_classes,)
+    BBSE: solves C · π_t = μ_t  →  π_t = C⁻¹ · μ_t
     """
     model.eval()
 
@@ -219,7 +220,7 @@ def estimate_target_priors_bbse(
             images = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
             images = images.to(device)
 
-            probs = F.softmax(model(images), dim=1)  # (B, num_classes)
+            probs = F.softmax(model(images), dim=1)
             mu_t += probs.sum(dim=0)
             total_samples += images.size(0)
 
@@ -230,15 +231,11 @@ def estimate_target_priors_bbse(
     target_priors = torch.clamp(target_priors, min=1e-8)
     target_priors = target_priors / target_priors.sum()
 
-    importance_weights = target_priors / (source_priors + 1e-8)
+    importance_weights = target_priors / (source_priors.to(device) + 1e-8)
     return target_priors, importance_weights
 
 
 def softmax_entropy(logits: torch.Tensor) -> torch.Tensor:
-    """
-    Shannon entropy of the softmax distribution.
-    Used for TENT-style test-time entropy minimisation.
-    """
     return -(logits.softmax(1) * logits.log_softmax(1)).sum(1)
 
 
@@ -249,12 +246,8 @@ def evaluate_with_prior_correction(
     device: torch.device,
 ) -> float:
     """
-    Evaluate accuracy with BBSE prior correction applied at inference.
-
-    The corrected posterior is:
+    Inference with BBSE prior correction:
         p_corrected(y | x) ∝ w_y · p_model(y | x)
-
-    Returns top-1 accuracy (%).
     """
     model.eval()
     correct = 0
