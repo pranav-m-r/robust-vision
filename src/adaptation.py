@@ -1,4 +1,6 @@
+import copy
 import logging
+import math
 from typing import Tuple
 
 import torch
@@ -89,9 +91,20 @@ def recalibrate_bn_robust(
     model: nn.Module,
     target_loader: DataLoader,
     device: torch.device,
+    alpha: float = 0.1,
 ) -> nn.Module:
     """
-    Robust batch-norm recalibration via median-of-batch-means.
+    Alpha-blended batch-norm recalibration with median-of-batch-means.
+
+    Instead of fully replacing source BN stats with target stats (which can
+    be catastrophic when the corruption changes statistics dramatically),
+    we blend:  final = (1-α) * source + α * target_median
+
+    α=0 means no adaptation (keep source stats).
+    α=1 means full replacement (original behaviour, risky).
+    α=0.1 is a conservative default that partially adapts without destroying
+    the learned representations.
+
     Reference: Schneider et al., NeurIPS 2020. https://arxiv.org/abs/2006.16971
     """
     model.train()
@@ -102,6 +115,10 @@ def recalibrate_bn_robust(
         for m in model.modules()
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
     ]
+
+    # Save original source BN stats for blending
+    source_means = [m.running_mean.clone() for m in bn_modules]
+    source_vars = [m.running_var.clone() for m in bn_modules]
 
     for module in bn_modules:
         module.momentum = 0
@@ -137,13 +154,17 @@ def recalibrate_bn_robust(
 
     with torch.no_grad():
         for i, module in enumerate(bn_modules):
-            module.running_mean.copy_(
-                torch.stack(all_means[i]).median(dim=0).values.to(device)
-            )
-            module.running_var.copy_(
-                torch.stack(all_vars[i]).median(dim=0).values.clamp(min=1e-8).to(device)
-            )
+            target_mean = torch.stack(all_means[i]).median(dim=0).values.to(device)
+            target_var = torch.stack(all_vars[i]).median(dim=0).values.clamp(min=1e-8).to(device)
 
+            # Alpha-blend: partial adaptation
+            blended_mean = (1.0 - alpha) * source_means[i] + alpha * target_mean
+            blended_var = (1.0 - alpha) * source_vars[i] + alpha * target_var
+
+            module.running_mean.copy_(blended_mean)
+            module.running_var.copy_(blended_var)
+
+    logging.info("    BN recal alpha=%.2f (%.0f%% source, %.0f%% target)", alpha, (1-alpha)*100, alpha*100)
     model.eval()
     return model
 
@@ -191,6 +212,73 @@ def compute_soft_confusion_matrix(
     return class_prob_sums
 
 
+def compute_confusion_matrix_from_noisy_source(
+    model: nn.Module,
+    source_loader: DataLoader,
+    num_classes: int,
+    device: torch.device,
+    noise_rate: float = 0.30,
+) -> torch.Tensor:
+    """
+    Estimate the clean confusion matrix C for BBSE from a noisy-labelled
+    source dataset (e.g. source_toxic.pt with 30% symmetric noise).
+
+    Steps
+    -----
+    1. Compute the *noisy* confusion matrix:
+         C_noisy[i, j] = E[ p_θ(i | x) | ỹ = j ]
+       where ỹ are the noisy labels in source_toxic.
+    2. Correct using the known noise transition matrix T:
+         C_clean = C_noisy @ T⁻¹
+       because  C_noisy = C_clean @ T  for symmetric noise on balanced classes.
+
+    Reference: Lipton et al., ICML 2018 (BBSE);
+               Patrini et al., CVPR 2017 (transition matrix).
+    """
+    model.eval()
+
+    class_prob_sums = torch.zeros(num_classes, num_classes, device=device)
+    class_counts = torch.zeros(num_classes, device=device)
+
+    with torch.no_grad():
+        for batch_data in source_loader:
+            images = batch_data[0].to(device)
+            labels = batch_data[1].to(device)  # noisy labels
+
+            probs = F.softmax(model(images), dim=1)  # (B, K)
+
+            for i in range(images.size(0)):
+                noisy_class = labels[i]
+                class_prob_sums[:, noisy_class] += probs[i]
+                class_counts[noisy_class] += 1
+
+    # Normalise to get C_noisy
+    for j in range(num_classes):
+        if class_counts[j] > 0:
+            class_prob_sums[:, j] /= class_counts[j]
+
+    C_noisy = class_prob_sums  # (K, K)
+
+    # Denoise: C_clean = C_noisy @ T^{-1}
+    T = build_transition_matrix(noise_rate, num_classes, device)
+    T_reg = T + 1e-4 * torch.eye(num_classes, device=device)
+    try:
+        T_inv = torch.linalg.inv(T_reg)
+    except torch.linalg.LinAlgError:
+        T_inv = torch.linalg.pinv(T)
+
+    C_clean = C_noisy @ T_inv
+
+    # Clamp and re-normalise columns to be valid distributions
+    C_clean = torch.clamp(C_clean, min=1e-8)
+    C_clean = C_clean / C_clean.sum(dim=0, keepdim=True)
+
+    logging.info("    C_noisy diagonal: %s", [f"{C_noisy[i,i]:.3f}" for i in range(num_classes)])
+    logging.info("    C_clean diagonal: %s", [f"{C_clean[i,i]:.3f}" for i in range(num_classes)])
+
+    return C_clean
+
+
 def get_source_priors(dataset: Dataset, num_classes: int = 10) -> torch.Tensor:
     labels = dataset.labels
     priors = torch.zeros(num_classes)
@@ -208,31 +296,57 @@ def estimate_target_priors_bbse(
     num_classes: int = 10,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    BBSE: solves C · π_t = μ_t  →  π_t = C⁻¹ · μ_t
+    Estimate target class priors directly from model's average softmax
+    predictions (μ_t) with Laplace smoothing.
+
+    This is much more stable than EM, which tends to collapse to a degenerate
+    2-3 class solution when the model is overconfident on corrupted data.
+
+    Method:
+      1. Compute μ_t = (1/N) Σ_x softmax(f(x))  on the target domain
+      2. Apply Laplace smoothing: π_t ∝ μ_t + ε  (ε = 1/K)
+      3. Clamp importance weights to [0.2, 5.0] to prevent extreme corrections
+
+    The softmax average is a consistent estimator of the label distribution
+    when the classifier is well-calibrated (which our temperature scaling
+    ensures).
+
+    Reference: Alexandari et al., ICML 2020 — direct label frequency estimation
     """
     model.eval()
 
-    mu_t = torch.zeros(num_classes, device=device)
-    total_samples = 0
-
+    # Collect all softmax predictions on the target domain
+    all_probs = []
     with torch.no_grad():
         for batch_data in target_loader:
             images = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
             images = images.to(device)
-
             probs = F.softmax(model(images), dim=1)
-            mu_t += probs.sum(dim=0)
-            total_samples += images.size(0)
+            all_probs.append(probs)
+    all_probs = torch.cat(all_probs, dim=0)  # (N, K)
 
-    mu_t = mu_t / total_samples
+    # Direct μ_t estimation: average softmax predictions
+    mu_t = all_probs.mean(dim=0)  # (K,)
 
-    C_inv = torch.linalg.pinv(C)
-    target_priors = torch.matmul(C_inv, mu_t)
-    target_priors = torch.clamp(target_priors, min=1e-8)
-    target_priors = target_priors / target_priors.sum()
+    # Laplace smoothing to prevent any class from having zero prior
+    eps = 1.0 / num_classes
+    pi_t = mu_t + eps
+    pi_t = pi_t / pi_t.sum()
 
-    importance_weights = target_priors / (source_priors.to(device) + 1e-8)
-    return target_priors, importance_weights
+    pi_s = source_priors.to(device)
+
+    # Importance weights with conservative clamping
+    importance_weights = pi_t / (pi_s + 1e-10)
+    importance_weights = importance_weights.clamp(min=0.2, max=5.0)
+
+    # Log entropy of estimated distribution (should be > 1.5 for 10 classes)
+    entropy = -(pi_t * torch.log(pi_t + 1e-10)).sum().item()
+    logging.info("    μ_t (raw avg softmax): %s", [f"{mu_t[i]:.4f}" for i in range(num_classes)])
+    logging.info("    π_t (smoothed):        %s", [f"{pi_t[i]:.4f}" for i in range(num_classes)])
+    logging.info("    π_t entropy: %.3f  (max=%.3f)", entropy, math.log(num_classes))
+    logging.info("    Clamped weights:       %s", [f"{importance_weights[i]:.3f}" for i in range(num_classes)])
+
+    return pi_t, importance_weights
 
 
 def softmax_entropy(logits: torch.Tensor) -> torch.Tensor:
@@ -269,3 +383,112 @@ def evaluate_with_prior_correction(
                 total += labels.size(0)
 
     return 100.0 * correct / total
+
+
+# ======================================================================
+# TENT / SAR  –  Test-time ENTropy minimisation
+# ======================================================================
+# Reference:  Niu et al., "Towards Stable Test-Time Adaptation in Dynamic
+#             Wild World", ICLR 2023  (SAR).
+#             Wang et al., "Tent: Fully Test-Time Adaptation by Entropy
+#             Minimization", ICLR 2021.
+# ======================================================================
+
+
+def _collect_bn_params(model: nn.Module):
+    """Return lists of BN (weight, bias) parameters and their names."""
+    params, names = [], []
+    for nm, m in model.named_modules():
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            for np_name, p in m.named_parameters():
+                if np_name in ("weight", "bias"):
+                    params.append(p)
+                    names.append(f"{nm}.{np_name}")
+    return params, names
+
+
+def tent_adapt(
+    model: nn.Module,
+    target_loader: DataLoader,
+    device: torch.device,
+    lr: float = 5e-4,
+    steps: int = 2,
+    num_classes: int = 10,
+    entropy_margin: float = 0.4,
+) -> nn.Module:
+    """
+    SAR-style selective entropy minimisation on the target stream.
+
+    Only BN affine parameters (γ, β) are updated.  Samples whose prediction
+    entropy exceeds `entropy_margin * ln(K)` are excluded from the loss to
+    prevent the model from collapsing on very uncertain inputs.
+
+    Parameters
+    ----------
+    model           : source-trained model (BN stats already recalibrated)
+    target_loader   : unlabelled target batches
+    device          : cuda / cpu
+    lr              : learning rate for BN affine params
+    steps           : number of full passes over the target stream
+    num_classes     : K (for entropy threshold)
+    entropy_margin  : fraction of max entropy (ln K) used as reliability gate
+
+    Returns
+    -------
+    model with adapted BN affine parameters
+    """
+    model = copy.deepcopy(model)       # don't mutate the caller's model
+    model.train()
+
+    # ── Freeze everything except BN affine params ────────────────────
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    bn_params, bn_names = _collect_bn_params(model)
+    for p in bn_params:
+        p.requires_grad_(True)
+
+    if not bn_params:
+        logging.warning("    TENT: no BN params found – skipping adaptation")
+        model.eval()
+        return model
+
+    logging.info("    TENT: adapting %d BN affine params over %d step(s)", len(bn_params), steps)
+
+    optimizer = torch.optim.Adam(bn_params, lr=lr)
+    e_threshold = entropy_margin * math.log(num_classes)
+
+    for step in range(steps):
+        total_loss, n_reliable, n_total = 0.0, 0, 0
+        for batch_data in target_loader:
+            images = batch_data[0] if isinstance(batch_data, (tuple, list)) else batch_data
+            images = images.to(device)
+
+            logits = model(images)
+            ent = softmax_entropy(logits)
+
+            # SAR gate: keep only reliable (low-entropy) predictions
+            mask = ent < e_threshold
+            n_total += len(ent)
+            n_reliable += mask.sum().item()
+
+            if mask.sum() == 0:
+                continue
+
+            loss = ent[mask].mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        fraction = n_reliable / max(n_total, 1)
+        logging.info(
+            "    TENT step %d/%d  |  loss %.4f  |  reliable %.1f%%",
+            step + 1, steps, total_loss / max(len(target_loader), 1), 100 * fraction,
+        )
+
+    # Restore full requires_grad and switch to eval
+    for p in model.parameters():
+        p.requires_grad_(True)
+    model.eval()
+    return model

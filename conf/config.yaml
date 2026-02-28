@@ -6,40 +6,62 @@ train_pipeline:
   _target_: src.train_pipeline.TrainPipeline
 
   data:
-    train_path: ${hydra:runtime.cwd}/data/train.pt
+    # Train on the FULL source_toxic.pt (no splitting needed)
+    train_path: ${hydra:runtime.cwd}/data/source_toxic.pt
+    # Monitor on clean val_sanity.pt each epoch
+    val_path: ${hydra:runtime.cwd}/data/val_sanity.pt
 
   training:
     seed: 42
-    epochs: 25
+    epochs: 30
     batch_size: 64
-    lr: 1e-5
+    lr: 1e-4
+    weight_decay: 1e-4
+    momentum: 0.9
     num_classes: 10
-    augmentation_factor: 1
+    augmentation_factor: 5
 
   loss:
-    # Generalised cross-entropy exponent (0 < q <= 1; lower = more robust)
     q: 0.7
-    # Truncation threshold
     k: 0.5
+    warmup_epochs: 10
 
 eval_pipeline:
   _target_: src.eval_pipeline.EvalPipeline
 
   data:
-    model_path: ${hydra:runtime.cwd}/results/train/2026-02-28_21-07-36/base_model.pt
-    val_path: ${hydra:runtime.cwd}/data/val.pt
-    test_path: ${hydra:runtime.cwd}/data/val_sanity.pt
+    model_path: ${hydra:runtime.cwd}/results/train/2026-02-28_22-20-05/base_model.pt
+    # Clean labels → calibration & accuracy monitoring
+    val_path: ${hydra:runtime.cwd}/data/val_sanity.pt
+    # Noisy labels → BBSE confusion matrix (denoised via T⁻¹)
+    source_path: ${hydra:runtime.cwd}/data/source_toxic.pt
+    # Target domain → BN recal, BBSE priors, TENT
+    test_path: ${hydra:runtime.cwd}/data/static.pt
 
   training:
     seed: 42
     batch_size: 64
     num_classes: 10
+    # source_toxic has 30% symmetric noise
     noise_rate: 0.3
 
   temperature:
-    t_min: 2
-    t_max: 2
-    steps: 1
+    t_min: 0.5
+    t_max: 5.0
+    steps: 200
+
+  adaptation:
+    # ── On/Off switches (set false to disable and measure impact) ──
+    enable_temp_scaling: true       # [1] Temperature scaling
+    enable_bn_recal: true           # [2] Alpha-blended BN recalibration
+    enable_tent: true               # [3] TENT / SAR entropy minimisation
+    enable_prior_estimation: true   # [4] Label shift prior estimation
+    enable_prior_correction: true   # [5] Prior-corrected inference
+    # ── Hyperparameters ────────────────────────────────────────────
+    tent_lr: 5e-4
+    tent_steps: 2
+    entropy_margin: 0.5
+    bn_alpha: 0.1
 
 logging:
   log_dir: logs

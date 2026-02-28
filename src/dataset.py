@@ -19,7 +19,7 @@ def _build_train_transforms() -> transforms.Compose:
     return transforms.Compose([
         transforms.RandomCrop(28, padding=4, fill=0),
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
+        transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1)),
         transforms.ColorJitter(brightness=0.4, contrast=0.4),
         transforms.RandomErasing(p=0.5, scale=(0.02, 0.25), ratio=(0.3, 3.3), value=0),
     ])
