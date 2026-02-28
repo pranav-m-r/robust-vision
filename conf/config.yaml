@@ -2,13 +2,11 @@ defaults:
   - base_config
   - _self_
 
-pipeline:
-  _target_: src.pipeline.Pipeline
+train_pipeline:
+  _target_: src.train_pipeline.TrainPipeline
 
   data:
-    source_path: ${hydra:runtime.cwd}/data/source_toxic.pt
-    val_path: ${hydra:runtime.cwd}/data/val_sanity.pt
-    target_path: ${hydra:runtime.cwd}/data/target_static.pt
+    train_path: ${hydra:runtime.cwd}/data/train.pt
 
   training:
     seed: 42
@@ -16,7 +14,7 @@ pipeline:
     batch_size: 64
     lr: 1e-5
     num_classes: 10
-    augmentation_factor: 5 
+    augmentation_factor: 1
 
   loss:
     # Generalised cross-entropy exponent (0 < q <= 1; lower = more robust)
@@ -24,10 +22,24 @@ pipeline:
     # Truncation threshold
     k: 0.5
 
+eval_pipeline:
+  _target_: src.eval_pipeline.EvalPipeline
+
+  data:
+    model_path: ${hydra:runtime.cwd}/results/train/2026-02-28_21-07-36/base_model.pt
+    val_path: ${hydra:runtime.cwd}/data/val.pt
+    test_path: ${hydra:runtime.cwd}/data/val_sanity.pt
+
+  training:
+    seed: 42
+    batch_size: 64
+    num_classes: 10
+    noise_rate: 0.3
+
   temperature:
-    t_min: 0.1
-    t_max: 10.0
-    steps: 200
+    t_min: 2
+    t_max: 2
+    steps: 1
 
 logging:
   log_dir: logs

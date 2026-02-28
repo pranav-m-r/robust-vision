@@ -50,28 +50,45 @@ class CustomPTDataset(Dataset):
         path: str,
         return_index: bool = False,
         split: str = "val",
+        is_labelled: bool = True,
         augmentation_factor: int = 1,
+        indices: list[int] | None = None,
     ):
         """
         Parameters
         ----------
-        path                : path to a .pt file containing keys 'x' (images) and 'y' (labels)
+        path                : path to a .pt file containing keys 'images' (and optionally 'labels')
         return_index        : if True, __getitem__ returns (x, y, idx) instead of (x, y)
-        split               : one of 'train' | 'val' | 'target'
-                              'train'  – strong augmentations (crop, flip, affine, jitter, erasing)
-                              'val'    – mild augmentations   (crop, flip, subtle jitter)
-                              'target' – no augmentation      (clean inference on test domain)
+        split               : one of 'train' | 'val' | 'test'
+                              'train' – strong augmentations (crop, flip, affine, jitter, erasing)
+                              'val'   – mild augmentations   (crop, flip, subtle jitter)
+                              'test'  – no augmentation      (clean inference on test domain)
+        is_labelled         : whether the file contains a 'labels' key
         augmentation_factor : virtual dataset multiplier (>= 1).
                               __len__ returns N * augmentation_factor; each logical index maps
                               back to the original sample via idx % N, so every original image
                               is visited augmentation_factor times per epoch with a fresh
                               random transform each time.
+        indices             : optional list of integer indices to subset the dataset.
+                              If provided, only those rows are kept (useful for train/val splits).
         """
         data = torch.load(path, weights_only=True)
+        images = data["images"].float()
 
-        self.images = data["x"].float()
+        if indices is not None:
+            idx_tensor = torch.tensor(indices, dtype=torch.long)
+            images = images[idx_tensor]
+
+        self.images = images
+        self.is_labelled = is_labelled
         self.return_index = return_index
-        self.labels = data["y"].long()
+
+        if is_labelled:
+            labels = data["labels"].long()
+            if indices is not None:
+                labels = labels[idx_tensor]
+            self.labels = labels
+
         self.augmentation_factor = max(1, augmentation_factor)
         self._base_len = len(self.images)
 
@@ -79,8 +96,8 @@ class CustomPTDataset(Dataset):
             self.transform = _build_train_transforms()
         elif split == "val":
             self.transform = _build_val_transforms()
-        else:  # "target" or any other value → no augmentation
-            self.transform = transforms.Compose([])
+        else:  # "test" or any other value → no augmentation
+            self.transform = transforms.Compose([torch.nn.Identity()])
 
     def __len__(self) -> int:
         return self._base_len * self.augmentation_factor
@@ -88,9 +105,9 @@ class CustomPTDataset(Dataset):
     def __getitem__(self, idx: int):
         orig_idx = idx % self._base_len
         x = self.transform(self.images[orig_idx])
-        y = self.labels[orig_idx]
 
-        if self.return_index:
-            return x, y, orig_idx
+        if self.is_labelled:
+            y = self.labels[orig_idx]
+            return (x, y, orig_idx) if self.return_index else (x, y)
 
-        return x, y
+        return (x, orig_idx) if self.return_index else x

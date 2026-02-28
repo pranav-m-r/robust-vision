@@ -26,9 +26,9 @@ def main(cfg: Config):
 
 	# Set up logging
 	current_date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-	log_dir = os.path.join(cfg.logging.log_dir)
+	log_dir = os.path.join(cfg.logging.log_dir, "train")
 	log_file = os.path.join(log_dir, current_date + ".log")
-	results_dir = os.path.join(cfg.logging.results_dir)
+	results_dir = os.path.join(cfg.logging.results_dir, "train", current_date)
 	os.makedirs(log_dir, exist_ok=True)
 	os.makedirs(results_dir, exist_ok=True)
 
@@ -45,7 +45,7 @@ def main(cfg: Config):
 	logging.info("Logging to: %s", log_file)
 
 	# Run pipeline
-	pipeline = hydra.utils.instantiate(cfg.pipeline)
+	pipeline = hydra.utils.instantiate(cfg.train_pipeline)
 	pipeline.run(results_dir=results_dir)
 
 	# Save config near outputs and logs

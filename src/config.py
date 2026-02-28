@@ -2,11 +2,18 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class DataConfig:
-    """Paths to the three .pt dataset files."""
-    source_path: str = "source_toxic.pt"
-    val_path: str = "val_sanity.pt"
-    target_path: str = "target_static.pt"
+class TrainDataConfig:
+    """Paths for the training pipeline."""
+    train_path: str = "data/source_toxic.pt"
+    val_path: str = "data/val_sanity.pt"
+
+
+@dataclass
+class EvalDataConfig:
+    """Paths for the evaluation pipeline."""
+    model_path: str = "results/train/base_model.pt"
+    val_path: str = "data/val_sanity.pt"
+    test_path: str = "data/static.pt"
 
 
 @dataclass
@@ -17,6 +24,16 @@ class TrainingConfig:
     batch_size: int = 64
     lr: float = 1e-5
     num_classes: int = 10
+    augmentation_factor: int = 5
+
+
+@dataclass
+class InferenceConfig:
+    """Minimal config for EvalPipeline (no training-specific fields)."""
+    seed: int = 42
+    batch_size: int = 64
+    num_classes: int = 10
+    noise_rate: float = 0.3
 
 
 @dataclass
@@ -35,12 +52,20 @@ class TemperatureConfig:
 
 
 @dataclass
-class PipelineConfig:
-    """Config consumed by src.pipeline.Pipeline via hydra.utils.instantiate."""
-    _target_: str = "src.pipeline.Pipeline"
-    data: DataConfig = field(default_factory=DataConfig)
+class TrainPipelineConfig:
+    """Config for TrainPipeline – trains the model and saves base_model.pt."""
+    _target_: str = "src.train_pipeline.TrainPipeline"
+    data: TrainDataConfig = field(default_factory=TrainDataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+
+
+@dataclass
+class EvalPipelineConfig:
+    """Config for EvalPipeline – adapts the model and generates predictions."""
+    _target_: str = "src.eval_pipeline.EvalPipeline"
+    data: EvalDataConfig = field(default_factory=EvalDataConfig)
+    training: InferenceConfig = field(default_factory=InferenceConfig)
     temperature: TemperatureConfig = field(default_factory=TemperatureConfig)
 
 
@@ -55,5 +80,6 @@ class LoggingConfig:
 @dataclass
 class Config:
     """Top-level Hydra config. Registered in the config store as 'base_config'."""
-    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    train_pipeline: TrainPipelineConfig = field(default_factory=TrainPipelineConfig)
+    eval_pipeline: EvalPipelineConfig = field(default_factory=EvalPipelineConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
