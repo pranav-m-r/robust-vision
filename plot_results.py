@@ -7,6 +7,15 @@ CSV columns: epoch, accuracy, F1_score
 Outputs:
   - plots/<base_name>_accuracy.png
   - plots/<base_name>_f1_score.png
+
+# Plot a single CSV
+python plot_results.py q_0.5_k_0.5.csv
+
+# Plot multiple CSVs
+python plot_results.py q_0.5_k_0.5.csv q_0.7_k_0.45.csv
+
+# Plot all CSVs in current directory
+python plot_results.py
 """
 
 import os
