@@ -1,0 +1,34 @@
+defaults:
+  - base_config
+  - _self_
+
+pipeline:
+  _target_: src.pipeline.Pipeline
+
+  data:
+    source_path: ${hydra:runtime.cwd}/data/source_toxic.pt
+    val_path: ${hydra:runtime.cwd}/data/val_sanity.pt
+    target_path: ${hydra:runtime.cwd}/data/target_static.pt
+
+  training:
+    seed: 42
+    epochs: 25
+    batch_size: 64
+    lr: 1e-5
+    num_classes: 10
+
+  loss:
+    # Generalised cross-entropy exponent (0 < q <= 1; lower = more robust)
+    q: 0.7
+    # Truncation threshold
+    k: 0.5
+
+  temperature:
+    t_min: 0.1
+    t_max: 10.0
+    steps: 200
+
+logging:
+  log_dir: logs
+  results_dir: results
+  console: true
