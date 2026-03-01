@@ -1,268 +1,145 @@
-**Project**: Robust Computer Vision — Hackenza 2026
+# Robust Vision Challenge [Hackenza 2026]
 
-**Team**: Pranav M R, Jayant Chandwani, Ishaan Gupta, Abhav Garg
+Team: Pranav M R, Jayant Chandwani, Ishaan Gupta, Abhav Garg
 
-**Overview**
-- Goal: Build a model that trains on a noisy, label-poisoned source (`source_toxic.pt`) and adapts to an unlabeled, noisy target (`static.pt`) using Test-Time Adaptation (TTA) methods so the final model is robust across 24 hidden corruption scenarios.
-- Repository contents (key files):
-  - `train.py` — Primary trainer + multi-phase pipeline (Phase**Project**: Robust Computer Vision — Hackenza 2026
+## Overview
+This repository contains our submission for the Robust Vision challenge. The goal is to train on a noisy / label-poisoned source dataset and robustly adapt to an unlabeled target domain at test time.
 
-**Team**: Pranav M R, Jayant Chandwani, Ishaan Gupta, Abhav Garg
+**Key idea:** train a noise-robust classifier on `source_toxic.pt`, then apply lightweight, unsupervised test-time adaptation (BatchNorm stat alignment + entropy minimization) and label-shift correction (BBSE) on the target distribution.
 
-**Overview**
-- Goal: Build a model that trains on a noisy, label-poisoned source (`source_toxic.pt`) and adapts to an unlabeled, noisy target (`static.pt`) using Test-Time Adaptation (TTA) methods so the final model is robust across 24 hidden corruption scenarios.
-- Repository contents (key files):
-  - `train.py` — Primary trainer + multi-phase pipeline (Phase 1: training, Phase 2: confusion estimation, Phase 3–4: BNStats/TTA and submission generation).
-  - `model_submission.py` — Model architecture: `RobustClassifier` and `load_weights()` support.
-  - `requirements.txt` — Minimal python dependencies.
-  - `generate_eval_data.py` — Local helper to generate small eval sets (used for development only).
-  - `checkpoints/` — Saved phase checkpoints (phase_1_training.pt, phase_2_confusion.pt, train_latest.pt).
-  - `results/` — Example outputs and weights used during development.
+### Repository layout
+- `train.py` — end-to-end multi-phase pipeline (training → estimation → test-time adaptation → submission)
+- `model_submission.py` — model definition (`RobustClassifier`) + `load_weights(path)` helper for graders
+- `requirements.txt` — Python dependencies
+- `data/` — datasets (place provided `.pt` files here)
+- `checkpoints/` — intermediate checkpoints created by `train.py`
 
-**Quick setup (Linux)**
-1. Create & activate a Python venv (recommended):
+### Setup
+Create a virtual environment and install dependencies:
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-2. Install dependencies:
-
-```bash
+**Windows (PowerShell)**
+```powershell
+conda create -n rv python=3.11
+conda activate rv
 pip install -r requirements.txt
-# additional recommended packages used by evaluation & utilities
-pip install scikit-learn hydra-core omegaconf python-dotenv rich
 ```
 
-3. Place the required dataset files into `data/`:
-- `source_toxic.pt` (training; keys: `images`, `labels`)
-- `static.pt` (unlabeled target; keys: `images`)
-- `val_sanity.pt` (100 clean samples; keys: `images`, `labels`)
-- `test_suite_public.pt` (optional local test suite for submission generation)
-
-Note: example small eval data can be generated for development with `generate_eval_data.py`.
-
-**Run full pipeline (reproducible)**
-- Train from scratch (this follows the Forensic Audit rules):
-
+**Linux/macOS (bash/zsh)**
 ```bash
-# run full train pipeline; it will save phase checkpoints under checkpoints/
-python train.py --data-dir data
-```
-
-- Continue from existing checkpoints / compute Phase 2 only (if checkpoints exist):
-
-```bash
-# If a `checkpoints/phase_1_training.pt` exists the script will load it automatically.
-python train.py --data-dir data
-```
-
-- Evaluate locally (development):
-
-```bash
-# generate a small eval dataset (dev only)
-python generate_eval_data.py
-
-# run evaluation pipeline (uses results/SCE + tent/weights.pth by default)
-python evaluate_models.py
-```
-
-**Core logic (what we implemented and why)**
-- Phase 1 — Robust training on noisy labels
-  - Uses Symmetric Cross-Entropy (`SCELoss`) to mitigate label noise (CE + reverse-CE term).
-  - Training is standard SGD with cosine LR schedule + linear warmup.
-  - Checkpointing: phase-level checkpoints (`checkpoints/phase_1_training.pt`) and `train_latest.pt` for resume.
-
-- Phase 2 — Confusion matrix estimation & correction
-  - Compute empirical noisy confusion matrix on held-out validation (from source noisy labels), correct it using the known symmetric noise transition matrix `T` (the challenge provides noise rate), then invert (with Tikhonov regularisation) to obtain `C_true` used for BBSE.(`Source:- https://arxiv.org/pdf/1609.03683`)
-  - Regularisation used to stabilise inversion: `BBSE_REG` (configurable, set in `train.py`).
-
-- Phase 3 — Test-Time Adaptation (TTA)
-  - `adapt_bn()` : Reset & re-estimate BatchNorm running statistics on target data (cumulative moving average) — aligns feature distributions.
-  - `tent_adapt()` : Entropy-minimization fine-tuning of BN affine parameters (γ, β) only — fast, unsupervised adaptation that avoids changing convolution weights.
-
-- Phase 4 — BBSE (Black-Box Shift Estimation)
-  - Estimate target class priors from model predictions using the corrected confusion matrix (`C_true`), apply label-shift correction by shifting logits: `logits + log(p_target / p_source)`.
-
-Why this approach?
-- The pipeline enforces strict separation: Phase 1 trains from source-only noisy data (no external clean data). Phases 3–4 adapt to the target without labels (unsupervised), using methods that are fast and preserve generalization (BN re-alignment + entropy minimization + BBSE for prior correction).
-
-**Forensic Audit & Reproducibility Notes (MUST READ)**
-- The organizers will re-run `train.py` from scratch on `source_toxic.pt`. To comply:
-  - `train.py` trains from random initialization by default; it does not load external pretrained weights.
-  - Do NOT add any pretrained checkpoint loading in `train.py` if you intend to publish as the final submission.
-  - Any use of external labeled data or forbidden augmentations will lead to disqualification.
-- The `model_submission.py` contains `RobustClassifier` and a `load_weights(path)` helper to satisfy the grader's automated weight loading.
-- Checkpoints created under `checkpoints/` are for convenience and reproducibility; the final submission should include the `weights.pth` you want graded alongside `train.py` and `model_submission.py`.
-
-**How to reproduce the reported results**
-1. Ensure `data/source_toxic.pt` and `data/val_sanity.pt` are available.
-2. Run full training: `python train.py --data-dir data`. This will create `checkpoints/phase_1_training.pt` and `train_latest.pt`.
-3. Optionally run `python generate_eval_data.py` (dev) then `python evaluate_models.py` to reproduce local evaluation metrics.
-
-**Recommended hyperparameters (tuning suggestions)**
-- `SCE_ALPHA`, `SCE_BETA` (loss weights) — trade-off between CE and robust RCE component.
-- `TENT_LR` and `TENT_STEPS` — controls speed & strength of TTA (higher lr/steps helps severe corruptions but risks overfitting to target batch).
-- `BBSE_REG` — Tikhonov regularisation to stabilise confusion-matrix inversion under extreme corruptions.
-All top-level constants live in `train.py` so experiments are reproducible via simple code edits or CLI flags if you add them.
-
-**Unit / smoke tests**
-- Minimal smoke test to check environment & model import:
-
-```bash
-python -c "import torch; from model_submission import RobustClassifier; m=RobustClassifier(); print('OK', sum(p.numel() for p in m.parameters()))"
-```
-
-- Run quick eval pipeline (dev):
-
-```bash
-python generate_eval_data.py
-python evaluate_models.py
-```
-
-**Accessibility & usability considerations**
-- CLI scripts are small and produce plaintext logs; saved evaluation text files are timestamped.
-- All data I/O uses PyTorch `torch.load`/`torch.save` for consistent, platform-independent behaviour.
-- Keep batch sizes and device placement in `train.py` as top-level constants for quick adaptation on different hardware.
-
-**Files to include with a final submission**
-- `train.py` (trainer)
-- `model_submission.py` (architecture + `load_weights` method)
-- `weights.pth` (final model weights produced by your run of `train.py`)
-- `submission.csv` (output predictions for public demo)
-- `README.md` (this file)
-
-**Notes / Constraints**
-- The provided `requirements.txt` includes the minimal dependencies; we recommend installing `scikit-learn` and a few helper packages used during development (listed above).
-- `generate_eval_data.py` is for development/testing only — do NOT use it during Phase 1 training for submissions (it generates corruptions that are forbidden during the training phase per the competition rules).
-
----
-*This README was created to document the project structure, how to run and reproduce the pipeline, and to explain the core methods used for robust test-time adaptation.*
- 1: training, Phase 2: confusion estimation, Phase 3–4: BNStats/TTA and submission generation).
-  - `model_submission.py` — Model architecture: `RobustClassifier` and `load_weights()` support.
-  - `requirements.txt` — Minimal python dependencies.
-  - `generate_eval_data.py` — Local helper to generate small eval sets (used for development only).
-  - `checkpoints/` — Saved phase checkpoints (phase_1_training.pt, phase_2_confusion.pt, train_latest.pt).
-  - `results/` — Example outputs and weights used during development.
-
-**Quick setup (Linux)**
-1. Create & activate a Python venv (recommended):
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-2. Install dependencies:
-
-```bash
+conda create -n rv python=3.11
+conda activate rv
 pip install -r requirements.txt
-# additional recommended packages used by evaluation & utilities
-pip install scikit-learn hydra-core omegaconf python-dotenv rich
 ```
 
-3. Place the required dataset files into `data/`:
-- `source_toxic.pt` (training; keys: `images`, `labels`)
-- `static.pt` (unlabeled target; keys: `images`)
-- `val_sanity.pt` (100 clean samples; keys: `images`, `labels`)
-- `test_suite_public.pt` (optional local test suite for submission generation)
+### Data
+Place the challenge-provided files under `data/`:
+- `source_toxic.pt` — training set (expects keys: `images`, `labels`)
+- `static.pt` — unlabeled target set (expects keys: `images`)
+- `test_suite_public.pt` — scenario suite used to generate the final submission (expects scenario tensors)
+- `val_sanity.pt` — small clean validation set (expects keys: `images`, `labels`)
 
-Note: example small eval data can be generated for development with `generate_eval_data.py`.
-
-**Run full pipeline (reproducible)**
-- Train from scratch (this follows the Forensic Audit rules):
+### Run
+Run the full pipeline:
 
 ```bash
-# run full train pipeline; it will save phase checkpoints under checkpoints/
-python train.py --data-dir data
+# Full pipeline: train from scratch to generate submission.csv
+python train.py
 ```
 
-- Continue from existing checkpoints / compute Phase 2 only (if checkpoints exist):
+`train.py` is fully resumable. If interrupted, re-running it will pick up from the last saved checkpoint. Delete `checkpoints/` to force a clean retraining run.
 
-```bash
-# If a `checkpoints/phase_1_training.pt` exists the script will load it automatically.
-python train.py --data-dir data
-```
+Outputs:
+- `weights.pth` — final weights for submission
+- `submission.csv` — predictions in the expected format
+- `checkpoints/` — phase checkpoints for resuming runs
 
-- Evaluate locally (development):
+### Phases at a glance
+- **Phase 1 — Robust training:** train from random initialization on noisy labels using Symmetric Cross-Entropy (SCE).
+- **Phase 2 — Confusion estimation:** estimate and correct a confusion matrix used for label-shift estimation.
+- **Phase 3 — Test-time adaptation:** re-estimate BatchNorm running stats on target data and optionally apply TENT-style entropy minimization (BN affine params only).
+- **Phase 4 — BBSE prior correction:** estimate target priors and apply a log-prior correction to predictions.
 
-```bash
-# generate a small eval dataset (dev only)
-python generate_eval_data.py
+## Architecture & Compliance
 
-# run evaluation pipeline (uses results/SCE + tent/weights.pth by default)
-python evaluate_models.py
-```
+**Model:** Custom ResNet-style classifier (`RobustClassifier`). It is a 3-stage residual network for 1×28×28 grayscale inputs: a stem (Conv→BN→ReLU), then three residual stages (64→64→128→256 channels; 28×28→14×14→7×7), followed by AdaptiveAvgPool, Dropout(0.25), and a Linear(256, 10) head. Each residual block contains two BatchNorm2d layers (plus one on the skip connection when channels or stride change), for **15 BatchNorm2d layers** total. This is intentional because BatchNorm statistics are our main handle for test-time adaptation.
 
-**Core logic (what we implemented and why)**
-- Phase 1 — Robust training on noisy labels
-  - Uses Symmetric Cross-Entropy (`SCELoss`) to mitigate label noise (CE + reverse-CE term).
-  - Training is standard SGD with cosine LR schedule + linear warmup.
-  - Checkpointing: phase-level checkpoints (`checkpoints/phase_1_training.pt`) and `train_latest.pt` for resume.
+**Initialization:** Random initialization. No pre-trained weights are used at any stage.
 
-- Phase 2 — Confusion matrix estimation & correction
-  - Compute empirical noisy confusion matrix on held-out validation (from source noisy labels), correct it using the known symmetric noise transition matrix `T` (the challenge provides noise rate), then invert (with Tikhonov regularisation) to obtain `C_true` used for BBSE.(`Source:- https://arxiv.org/pdf/1609.03683`)
-  - Regularisation used to stabilise inversion: `BBSE_REG` (configurable, set in `train.py`).
+**Augmentation:** Standard geometry and photometric transforms only: `RandomCrop(28, padding=4, reflect)`, `RandomHorizontalFlip`, `RandomRotation(15°)`, `RandomErasing(p=0.25)`. We do not use corruption-simulating augmentations (no AugMix, PixMix, or corruption-mimicking transforms).
 
-- Phase 3 — Test-Time Adaptation (TTA)
-  - `adapt_bn()` : Reset & re-estimate BatchNorm running statistics on target data (cumulative moving average) — aligns feature distributions.
-  - `tent_adapt()` : Entropy-minimization fine-tuning of BN affine parameters (γ, β) only — fast, unsupervised adaptation that avoids changing convolution weights.
+## Evaluation setup
 
-- Phase 4 — BBSE (Black-Box Shift Estimation)
-  - Estimate target class priors from model predictions using the corrected confusion matrix (`C_true`), apply label-shift correction by shifting logits: `logits + log(p_target / p_source)`.
+To compare approaches during development, we built a private `eval_suite` from labeled data, containing **8 corruption scenarios** at fixed severity levels:
 
-Why this approach?
-- The pipeline enforces strict separation: Phase 1 trains from source-only noisy data (no external clean data). Phases 3–4 adapt to the target without labels (unsupervised), using methods that are fast and preserve generalization (BN re-alignment + entropy minimization + BBSE for prior correction).
+| Scenario | Type |
+| --- | --- |
+| `contrast_reduction` | Photometric |
+| `defocus_blur` | Blur |
+| `gaussian_noise` | Additive noise |
+| `impulse_noise_medium` | Salt-and-pepper noise |
+| `impulse_noise_heavy` | Salt-and-pepper noise (severe) |
+| `pixelate_medium` | Spatial downsampling |
+| `posterize` | Bit-depth reduction |
+| `shot_noise` | Poisson noise |
 
-**Forensic Audit & Reproducibility Notes (MUST READ)**
-- The organizers will re-run `train.py` from scratch on `source_toxic.pt`. To comply:
-  - `train.py` trains from random initialization by default; it does not load external pretrained weights.
-  - Do NOT add any pretrained checkpoint loading in `train.py` if you intend to publish as the final submission.
-  - Any use of external labeled data or forbidden augmentations will lead to disqualification.
-- The `model_submission.py` contains `RobustClassifier` and a `load_weights(path)` helper to satisfy the grader's automated weight loading.
-- Checkpoints created under `checkpoints/` are for convenience and reproducibility; the final submission should include the `weights.pth` you want graded alongside `train.py` and `model_submission.py`.
+Each scenario contains 5,000 labeled images with a **deliberately uneven class distribution** (e.g., Sandal = 35%, Trouser = 1.2%) to simulate the type of prior shift we expect in the hidden evaluation. The training set is near-uniform (≈6,000 per class), so the model must handle both covariate shift *and* label shift. We used **Macro-F1** as the primary comparison metric because it weights all 10 classes equally regardless of support, making it sensitive to failures on minority classes. All ablations reported here (GCE vs. SCE, TENT on/off, temperature scaling) were measured on this suite.
 
-**How to reproduce the reported results**
-1. Ensure `data/source_toxic.pt` and `data/val_sanity.pt` are available.
-2. Run full training: `python train.py --data-dir data`. This will create `checkpoints/phase_1_training.pt` and `train_latest.pt`.
-3. Optionally run `python generate_eval_data.py` (dev) then `python evaluate_models.py` to reproduce local evaluation metrics.
+Compliance note: `eval_suite` was used only for evaluation and hyperparameter tuning. We did not use it to train the submitted model in any form (no gradient updates and no mixing into the training set).
 
-**Recommended hyperparameters (tuning suggestions)**
-- `SCE_ALPHA`, `SCE_BETA` (loss weights) — trade-off between CE and robust RCE component.
-- `TENT_LR` and `TENT_STEPS` — controls speed & strength of TTA (higher lr/steps helps severe corruptions but risks overfitting to target batch).
-- `BBSE_REG` — Tikhonov regularisation to stabilise confusion-matrix inversion under extreme corruptions.
-All top-level constants live in `train.py` so experiments are reproducible via simple code edits or CLI flags if you add them.
+## Phase 1: Robust training (Decontamination)
 
-**Unit / smoke tests**
-- Minimal smoke test to check environment & model import:
+**Approach:** We train on `source_toxic.pt` (60,000 images, 30% symmetric label noise) using [**Symmetric Cross-Entropy (SCE) loss**](https://arxiv.org/abs/1908.06112). Optimization uses SGD (momentum=0.9, weight_decay=5e-4) with a 5-epoch linear warm-up followed by cosine annealing, for 100 epochs total. We keep the checkpoint with the best noisy-validation accuracy.
 
-```bash
-python -c "import torch; from model_submission import RobustClassifier; m=RobustClassifier(); print('OK', sum(p.numel() for p in m.parameters()))"
-```
+Training-data restriction note: all learned weights come only from `source_toxic.pt`, as instructed. We do not train on any additional labeled data, and we avoid banned augmentation techniques (for example, Mixup). Only the permitted augmentations listed in the first section are used.
 
-- Run quick eval pipeline (dev):
+**What we tried:** We initially trained with [**Generalized Cross-Entropy (GCE) loss**](https://arxiv.org/abs/1805.07836) ($q=0.7$), which interpolates between MAE and CE and is well-known to resist noisy gradients. After switching to SCE we saw a consistent improvement across all corruption scenarios on our eval set, so we went with SCE for the final submission. In practice the difference wasn't dramatic, but SCE was more stable to tune.
 
-```bash
-python generate_eval_data.py
-python evaluate_models.py
-```
+**Justification:** SCE combines a standard CE term with a Reverse CE (RCE) term:
 
-**Accessibility & usability considerations**
-- CLI scripts are small and produce plaintext logs; saved evaluation text files are timestamped.
-- All data I/O uses PyTorch `torch.load`/`torch.save` for consistent, platform-independent behaviour.
-- Keep batch sizes and device placement in `train.py` as top-level constants for quick adaptation on different hardware.
+$$\mathcal{L}_{SCE} = \alpha \cdot \underbrace{-\log p_y}_{\text{CE}} + \beta \cdot \underbrace{-\sum_k p_k \log \tilde{y}_k}_{\text{RCE}}$$
 
-**Files to include with a final submission**
-- `train.py` (trainer)
-- `model_submission.py` (architecture + `load_weights` method)
-- `weights.pth` (final model weights produced by your run of `train.py`)
-- `submission.csv` (output predictions for public demo)
-- `README.md` (this file)
+With symmetric label noise at rate $\eta$, the CE gradient can become dominated by memorized noise once the model becomes confident. The RCE term counteracts this by treating the model's softmax output as a soft label and penalizing deviation from the (smoothed) one-hot target. This makes the loss *symmetric* in $(p, y)$ and helps bound the influence of noisy samples. Coefficients $\alpha=1.0$ and $\beta=0.5$ balance learning speed against noise resistance.
 
-**Notes / Constraints**
-- The provided `requirements.txt` includes the minimal dependencies; we recommend installing `scikit-learn` and a few helper packages used during development (listed above).
-- `generate_eval_data.py` is for development/testing only — do NOT use it during Phase 1 training for submissions (it generates corruptions that are forbidden during the training phase per the competition rules).
+## Phase 2: Distribution estimation (Reconnaissance)
 
----
-*This README was created to document the project structure, how to run and reproduce the pipeline, and to explain the core methods used for robust test-time adaptation.*
+**Approach:** After Phase 1, we compute $\hat{C}_{noisy}$ on the held-out 10% noisy validation split. Instead of hard argmax predictions, we accumulate **soft confusion counts from the model's softmax probabilities**. This gives a smoother, lower-variance estimate of $C_{noisy}[j,k] = P(\hat{y}=k \mid \tilde{y}=j)$, especially for minority classes. Using the known [**symmetric noise transition matrix $T$**](https://arxiv.org/abs/1609.03683) (with $\eta=0.3$), we recover the **clean confusion matrix** $C_{true}$, which is used by the BBSE estimator in Phase 3.
+
+**What we tried:** We first tried a standard hard-prediction confusion matrix on the clean `val_sanity.pt` set, but that set has only 100 samples, so the estimates were noisy. Switching to the full 10% noisy validation split with soft counts was more stable. We also experimented with [**temperature scaling**](https://arxiv.org/abs/1706.04599) before BBSE inversion, aiming for a better $\mu_{target}$ estimate. In our tests it hurt performance because it amplified the BBSE-estimated class weights and over-corrected the prior, so we removed it.
+
+**Justification:** The key insight, formalized by Patrini et al., is that under class-dependent label noise the *noisy* posterior and the *clean* posterior are related by the transition matrix $T$. For symmetric noise at rate $\eta$ across $K$ classes, $T$ takes a closed form:
+
+$$T_{ij} = P(\tilde{y}=j \mid y=i) = \begin{cases} 1 - \eta & \text{if } i = j \\ \dfrac{\eta}{K-1} & \text{if } i \neq j \end{cases}$$
+
+Every clean label stays correct with probability $1-\eta=0.7$, and flips to any one of the other $K-1=9$ classes with equal probability $\eta/(K-1) \approx 0.033$. This gives a diagonally dominant matrix that is easy to invert analytically.
+
+Because the model is trained on noisy labels, the resulting confusion matrix $C_{noisy}[j,k] = P(\hat{y}=k \mid \tilde{y}=j)$ reflects noisy-label statistics. The correction step recovers the clean version:
+
+$$C_{noisy} = T^\top C_{true} \quad \Longrightarrow \quad C_{true} = T^{-1} C_{noisy}$$
+
+$C_{true}$ then acts as the BBSE channel matrix. It describes how predictions distribute per true class, which is exactly what BBSE needs to invert label shift at test time. This lets BBSE handle large prior shifts (e.g., Sandal = 35% of eval samples vs. Trouser = 1.2%) without requiring any target labels.
+
+## Phase 3: Test-time adaptation (Alignment)
+
+**Approach:** For each test scenario, three sequential adaptation steps are applied to a freshly reloaded copy of the trained model:
+
+1. **[BN Statistics Reset & Re-estimation](https://arxiv.org/abs/2006.10963) (`adapt_bn`):** All BatchNorm running means and variances are zeroed and recomputed over the target batch in a single no-grad forward pass (`momentum=None` for a cumulative average). This replaces source-domain BN statistics with target-domain statistics and helps correct covariate shift induced by sensor noise.
+
+2. **[TENT Entropy Minimization](https://arxiv.org/abs/2006.10726) (`tent_adapt`):** Only the BN affine parameters ($\gamma$, $\beta$) are unfrozen and updated for 10 Adam steps (lr=2e-3), minimizing Shannon entropy $H = -\sum_k p_k \log p_k$ over the target batch. This encourages the model to produce confident, low-entropy predictions under the new domain.
+
+3. **[BBSE Prior Correction](https://arxiv.org/abs/1802.03916) (`predict_with_prior`):** The target class prior $\hat{p}_{target}$ is estimated by inverting the BBSE equation: $\hat{\mu}_{target} = C_{true}^\top \hat{p}_{target}$, where $\hat{\mu}_{target}$ is the empirical prediction-frequency vector. Final predictions use a log-ratio correction:
+
+$$\hat{y} = \arg\max_k \left[\log f_k(x) + \log \frac{\hat{p}_{target}[k]}{1/K}\right]$$
+
+**What we tried:** We ran the full pipeline with and without TENT. For mild corruptions like `contrast_reduction` and `defocus_blur`, the difference was small. For harder shifts like `pixelate_medium`, TENT produced a meaningful improvement because entropy minimization encourages more decisive predictions when BN statistics alone do not fully close the domain gap. TENT can become unstable if the learning rate or step count is too high (it may collapse to a single class), so we kept it conservative at 8-10 steps with lr=2e-3. We found 8 steps to perform slightly better.
+
+**Generalization Justification:** BN re-estimation and TENT are both unsupervised and react to the test distribution as it arrives, without assuming a specific corruption type. By updating only BN parameters (a small fraction of the total weights), the feature representation learned during Phase 1 stays largely intact. Only the internal normalization shifts to match the new domain, which is why we expect the approach to transfer to unseen corruptions in `hidden_eval.pt`.
+
+## References
+
+- [Symmetric Cross-Entropy Loss for Robust Learning with Noisy Labels](https://arxiv.org/abs/1908.06112) (Wang et al., ECCV 2020) -> SCE
+- [Generalized Cross-Entropy Loss for Training Deep Neural Networks with Noisy Labels](https://arxiv.org/abs/1805.07836) (Zhang et al., NeurIPS 2018) -> GCE
+- [Making Deep Neural Networks Robust to Label Noise: a Loss Correction Approach](https://arxiv.org/abs/1609.03683) (Patrini et al., CVPR 2017) -> Noise Transition Matrix
+- [Test-Time Training with Self-Supervision for Generalization under Distribution Shifts](https://arxiv.org/abs/2006.10963) (Sun et al., ICML 2020) -> BNStats
+- [Black Box Shift Estimation](https://arxiv.org/abs/1802.03916) (Lipton et al., ICML 2018) -> BBSE
+- [Tent: Fully Test-Time Adaptation by Entropy Minimization](https://arxiv.org/abs/2006.10726) (Wang et al., ICLR 2021) -> Tent
+- [On Calibration of Modern Neural Networks](https://arxiv.org/abs/1706.04599) (Guo et al., ICML 2017) -> Temperature Scaling
