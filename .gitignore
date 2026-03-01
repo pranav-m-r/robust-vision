@@ -1,6 +1,10 @@
-data
-*.pth
-*.pt
 .vscode
 __pycache__
 .ipynb_checkpoints
+
+data
+eval_data_WA
+checkpoints
+
+*.pt
+*.csv

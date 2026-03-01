@@ -29,7 +29,7 @@ SEED            = 42
 NUM_CLASSES     = 10
 NOISE_RATE      = 0.3          # known symmetric label-noise rate
 BATCH_SIZE      = 256
-EPOCHS          = 150
+EPOCHS          = 100
 LR              = 0.1
 WEIGHT_DECAY    = 5e-4
 GCE_Q           = 0.7          # GCE truncation parameter
@@ -122,6 +122,32 @@ class GCELoss(nn.Module):
 
 
 # ================================================================
+# SCE Loss  (Wang et al., ICCV 2019)
+# ================================================================
+class SCELoss(nn.Module):
+    """
+    Symmetric Cross-Entropy for learning with noisy labels.
+
+    L_SCE = α · CE(p, y) + β · RCE(p, y)
+    """
+
+    def __init__(self, alpha: float = 1.0, beta: float = 0.5,
+                 num_classes: int = 10):
+        super().__init__()
+        self.alpha = alpha
+        self.beta  = beta
+        self.num_classes = num_classes
+
+    def forward(self, logits, labels):
+        ce = F.cross_entropy(logits, labels)
+        p = F.softmax(logits, dim=1).clamp(min=1e-7, max=1.0)
+        y = F.one_hot(labels, self.num_classes).float()
+        y = y.clamp(min=1e-4, max=1.0)
+        rce = -(p * torch.log(y)).sum(dim=1).mean()
+        return self.alpha * ce + self.beta * rce
+
+
+# ================================================================
 # Dataset with *permitted* augmentations only
 # ================================================================
 class AugmentedDataset(torch.utils.data.Dataset):
@@ -167,7 +193,7 @@ def evaluate(model, loader, device):
 
 
 def train_model(model, train_loader, val_loader, device):
-    criterion = GCELoss(q=GCE_Q)
+    criterion = SCELoss(alpha=1.0, beta=0.5, num_classes=NUM_CLASSES)  # swap back to GCELoss(q=GCE_Q) when done
     optimizer = optim.SGD(model.parameters(), lr=LR,
                           momentum=0.9, weight_decay=WEIGHT_DECAY)
     warmup  = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01,
@@ -292,6 +318,55 @@ def adapt_bn(model, images, device, batch_size=256):
     model.eval()
 
 
+def tent_adapt(model, target_images, steps=3, lr=5e-4):
+    """
+    TENT: Test-time Entropy minimisation.
+
+    Fine-tune only BN affine parameters (γ, β) to minimise the
+    entropy of model predictions on the target batch.  This
+    encourages the model to make confident (low-entropy) predictions,
+    which empirically improves accuracy on shifted domains.
+
+    Reference:
+        Wang et al., "Tent: Fully Test-Time Adaptation by Entropy
+        Minimization", ICLR 2021.
+    """
+    adapted = copy.deepcopy(model)
+    adapted.to(DEVICE)
+
+    # Freeze everything
+    for p in adapted.parameters():
+        p.requires_grad_(False)
+
+    # Un-freeze + train-mode only for BN layers
+    bn_params = []
+    for m in adapted.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.train()                     # use batch stats
+            m.weight.requires_grad_(True)
+            m.bias.requires_grad_(True)
+            bn_params += [m.weight, m.bias]
+
+    optimizer = torch.optim.Adam(bn_params, lr=lr)
+    loader    = DataLoader(TensorDataset(target_images),
+                           batch_size=BATCH_SIZE, shuffle=True)
+
+    for step in range(steps):
+        for (batch,) in loader:
+            batch  = batch.to(DEVICE)
+            logits = adapted(batch)
+            probs  = F.softmax(logits, dim=1)
+            # Shannon entropy
+            entropy = -(probs * probs.clamp(min=1e-8).log()).sum(dim=1).mean()
+
+            optimizer.zero_grad()
+            entropy.backward()
+            optimizer.step()
+
+    adapted.eval()
+    return adapted
+
+
 # ================================================================
 # Phase 4 – BBSE  (Black-Box Shift Estimation – Lipton et al. 2018)
 # ================================================================
@@ -317,9 +392,9 @@ def estimate_target_priors(model, C_true, images, device,
 
     # BBSE inversion (regularise to avoid singular matrix)
     C_T = C_true.T.clone()
-    C_T += 1e-4 * torch.eye(K)
+    C_T += 1e-2 * torch.eye(K)          # stronger reg to stabilise inversion
     p_target = torch.inverse(C_T) @ mu
-    p_target = p_target.clamp(min=1e-6)
+    p_target = p_target.clamp(min=0.02, max=0.40)  # prevent runaway class priors
     p_target = p_target / p_target.sum()
     return p_target
 

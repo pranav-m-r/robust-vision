@@ -1,0 +1,45 @@
+Device: cuda
+Weights: weights.pth
+TTA+BBSE: ON
+Eval dir: eval_data_WA
+======================================================================
+C_true  : loaded from checkpoints/phase_2_confusion.pt
+
+--- CLEAN BASELINE ---
+  Accuracy: 0.9152  Macro-F1: 0.8781
+
+--- CORRUPTION SCENARIOS ---
+  contrast_reduction         Acc=0.8902  F1=0.8507
+  defocus_blur               Acc=0.8528  F1=0.8018
+  gaussian_noise             Acc=0.7838  F1=0.7207
+  impulse_noise_heavy        Acc=0.6670  F1=0.5745
+  impulse_noise_medium       Acc=0.7938  F1=0.7327
+  pixelate_medium            Acc=0.5486  F1=0.4160
+  posterize                  Acc=0.8902  F1=0.8472
+  shot_noise                 Acc=0.8368  F1=0.7884
+
+======================================================================
+SUMMARY
+======================================================================
+  Mean Accuracy : 0.7829  (min=0.5486, max=0.8902)
+  Mean Macro-F1 : 0.7165  (min=0.4160, max=0.8507)
+  Worst scenario: pixelate_medium
+  Best scenario : contrast_reduction
+
+--- Detailed report for WORST scenario: pixelate_medium ---
+              precision    recall  f1-score   support
+
+ T-shirt/top       0.28      0.52      0.36       177
+     Trouser       0.31      0.14      0.19        59
+    Pullover       0.42      0.17      0.24       589
+       Dress       0.39      0.74      0.51       295
+        Coat       0.26      0.31      0.28       236
+      Sandal       0.90      0.72      0.80      1764
+       Shirt       0.41      0.37      0.39       882
+     Sneaker       0.17      0.41      0.24       117
+         Bag       0.69      0.68      0.68       705
+  Ankle boot       0.34      0.73      0.47       176
+
+    accuracy                           0.55      5000
+   macro avg       0.42      0.48      0.42      5000
+weighted avg       0.60      0.55      0.56      5000
