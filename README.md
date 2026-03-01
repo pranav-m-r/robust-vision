@@ -82,7 +82,7 @@ To compare approaches during development, we built a private `eval_suite` from l
 | `posterize` | Bit-depth reduction |
 | `shot_noise` | Poisson noise |
 
-Each scenario contains 5,000 labeled images with a **deliberately uneven class distribution** (e.g., Sandal = 35%, Trouser = 1.2%) to simulate the type of prior shift we expect in the hidden evaluation. The training set is near-uniform (≈6,000 per class), so the model must handle both covariate shift *and* label shift. We used **Macro-F1** as the primary comparison metric because it weights all 10 classes equally regardless of support, making it sensitive to failures on minority classes. All ablations reported here (GCE vs. SCE, TENT on/off, temperature scaling) were measured on this suite.
+Each scenario contains 5,000 labeled images with a **deliberately uneven class distribution** (e.g., Sandal = 35%, Trouser = 1.2%) to simulate the type of prior shift we expect in the hidden evaluation. The training set is near-uniform (≈6,000 per class), so the model must handle both covariate shift and label shift. We used **Macro-F1** as the primary comparison metric because it weights all 10 classes equally regardless of support, making it sensitive to failures on minority classes. All ablations reported here (GCE vs. SCE, TENT on/off, temperature scaling) were measured on this suite.
 
 Compliance note: `eval_suite` was used only for evaluation and hyperparameter tuning. We did not use it to train the submitted model in any form (no gradient updates and no mixing into the training set).
 
@@ -102,7 +102,7 @@ With symmetric label noise at rate $\eta$, the CE gradient can become dominated 
 
 ## Phase 2: Distribution estimation (Reconnaissance)
 
-**Approach:** After Phase 1, we compute $\hat{C}_{noisy}$ on the held-out 10% noisy validation split. Instead of hard argmax predictions, we accumulate **soft confusion counts from the model's softmax probabilities**. This gives a smoother, lower-variance estimate of $C_{noisy}[j,k] = P(\hat{y}=k \mid \tilde{y}=j)$, especially for minority classes. Using the known [**symmetric noise transition matrix $T$**](https://arxiv.org/abs/1609.03683) (with $\eta=0.3$), we recover the **clean confusion matrix** $C_{true}$, which is used by the BBSE estimator in Phase 3.
+**Approach:** After Phase 1, we compute $\hat{C_n}$ on the held-out 10% noisy validation split. Instead of hard argmax predictions, we accumulate **soft confusion counts from the model's softmax probabilities**. This gives a smoother, lower-variance estimate of $C_{noisy}[j,k] = P(\hat{y}=k \mid \tilde{y}=j)$, especially for minority classes. Using the known [**symmetric noise transition matrix T**](https://arxiv.org/abs/1609.03683) (with $\eta=0.3$), we recover the **clean confusion matrix** $C_{true}$, which is used by the BBSE estimator in Phase 3.
 
 **What we tried:** We first tried a standard hard-prediction confusion matrix on the clean `val_sanity.pt` set, but that set has only 100 samples, so the estimates were noisy. Switching to the full 10% noisy validation split with soft counts was more stable. We also experimented with [**temperature scaling**](https://arxiv.org/abs/1706.04599) before BBSE inversion, aiming for a better $\mu_{target}$ estimate. In our tests it hurt performance because it amplified the BBSE-estimated class weights and over-corrected the prior, so we removed it.
 
