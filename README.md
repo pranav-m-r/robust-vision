@@ -126,7 +126,7 @@ $C_{true}$ then acts as the BBSE channel matrix. It describes how predictions di
 
 2. **[TENT Entropy Minimization](https://arxiv.org/abs/2006.10726) (`tent_adapt`):** Only the BN affine parameters ($\gamma$, $\beta$) are unfrozen and updated for 10 Adam steps (lr=2e-3), minimizing Shannon entropy $H = -\sum_k p_k \log p_k$ over the target batch. This encourages the model to produce confident, low-entropy predictions under the new domain.
 
-3. **[BBSE Prior Correction](https://arxiv.org/abs/1802.03916) (`predict_with_prior`):** The target class prior $\hat{p}_{target}$ is estimated by inverting the BBSE equation: $\hat{\mu}_{target} = C_{true}^\top \hat{p}_{target}$, where $\hat{\mu}_{target}$ is the empirical prediction-frequency vector. Final predictions use a log-ratio correction:
+3. **[BBSE Prior Correction](https://arxiv.org/abs/1802.03916) (`predict_with_prior`):** The target class prior $\hat{p_t}$ is estimated by inverting the BBSE equation: $\hat{\mu_t} = C_{true}^\top \hat{p_t}$, where $\hat{\mu_t}$ is the empirical prediction-frequency vector. Final predictions use a log-ratio correction:
 
 $$\hat{y} = \arg\max_k \left[\log f_k(x) + \log \frac{\hat{p}_{target}[k]}{1/K}\right]$$
 
