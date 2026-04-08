@@ -1,6 +1,9 @@
 # Robust Vision Challenge [Hackenza 2026]
 
-Team: Pranav M R, Jayant Chandwani, Ishaan Gupta, Abhav Garg
+**Team:** Pranav M R · Jayant Chandwani · Ishaan Gupta · Abhav Garg
+  
+**Check out these slides for a detailed explanation of the entire pipeline and our approach!**  
+🖼️ [View the full presentation](https://docs.google.com/presentation/d/1yH7m-2aNit1coscHDtDFPPkcPYJdxOw8udSROavKhzw)
 
 ## Overview
 This repository contains our submission for the Robust Vision challenge. The goal is to train on a noisy / label-poisoned source dataset and robustly adapt to an unlabeled target domain at test time.
